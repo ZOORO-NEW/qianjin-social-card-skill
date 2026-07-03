@@ -1,0 +1,7 @@
+node_modules/
+output/
+*.png
+_temp_*.html
+.DS_Store
+Thumbs.db
+*.log

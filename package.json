@@ -1,0 +1,31 @@
+{
+  "name": "qianjin-social-card-skill",
+  "version": "1.0.0",
+  "description": "将长文案排版生成 3:4 比例社交卡片图片，自动裁切多张，适合小红书和公众号贴图。6种风格、智能分页、Markdown支持、关键句高亮。",
+  "main": "scripts/generate-cards.js",
+  "bin": {
+    "social-card": "scripts/generate-cards.js"
+  },
+  "scripts": {
+    "start": "node scripts/generate-cards.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^22.0.0"
+  },
+  "keywords": [
+    "social-card",
+    "xiaohongshu",
+    "image",
+    "typography",
+    "排版",
+    "卡片",
+    "小红书",
+    "公众号"
+  ],
+  "author": "qianjin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qianjin/social-card-skill.git"
+  }
+}
