@@ -20,7 +20,9 @@
  *   --subtitle <text>     Cover subtitle
  *   --tag <text>          Topic tag on cover (e.g. #干货分享)
  *   --author <text>       Author name on cover/end
- *   --no-cover            Skip cover page
+ *   --cover-image <path>  Cover illustration image file path
+ *   --cover-image <path>  Cover illustration image file path
+  --no-cover            Skip cover page
  *   --no-end              Skip end page
  *   --preview             Generate HTML preview file only (no PNG)
  *   --density <type>      compact | comfortable | spacious (default: comfortable)
@@ -48,11 +50,12 @@ const DEFAULT_HEIGHT = 1440; // 3:4 ratio
 const SCRIPT_DIR = __dirname;
 const PACKAGE_DIR = path.join(SCRIPT_DIR, '..');
 
-// Density presets
+// Density presets — values tuned for 1080x1440 (3:4) cards
+// Based on actual rendering: usable area ~920x1180px after padding+footer
 const DENSITY = {
-  compact:    { charsPerCard: 300, lineHeight: 1.6, paraSpacing: 14, fontSize: 30, headingSize: 44 },
-  comfortable:{ charsPerCard: 220, lineHeight: 1.85, paraSpacing: 22, fontSize: 34, headingSize: 48 },
-  spacious:   { charsPerCard: 150, lineHeight: 2.1, paraSpacing: 32, fontSize: 36, headingSize: 52 },
+  compact:    { charsPerCard: 600, lineHeight: 1.6, paraSpacing: 14, fontSize: 30, headingSize: 44 },
+  comfortable:{ charsPerCard: 460, lineHeight: 1.85, paraSpacing: 20, fontSize: 34, headingSize: 48 },
+  spacious:   { charsPerCard: 320, lineHeight: 2.1, paraSpacing: 28, fontSize: 36, headingSize: 52 },
 };
 
 // ============================================================
@@ -391,6 +394,29 @@ function textWidth(str) {
   return w;
 }
 
+/**
+ * Estimate the visual weight of a text block.
+ * Markdown elements (headings, quotes, tables, lists) take more vertical space
+ * per character than plain text. This function returns a weighted character count
+ * that better reflects actual rendering height.
+ */
+function estimateVisualWeight(text) {
+  const lines = text.split('\n');
+  let weight = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { weight += 1; continue; }
+    if (/^#\s+/.test(trimmed)) weight += trimmed.length * 3.2 + 40;  // h1: largest heading + margins
+    else if (/^##\s+/.test(trimmed)) weight += trimmed.length * 2.8 + 30;  // heading + large margins
+    else if (/^###\s+/.test(trimmed)) weight += trimmed.length * 2.0 + 22;
+    else if (/^>\s/.test(trimmed)) weight += trimmed.length * 1.4 + 32; // quote padding + border
+    else if (/^\|.*\|/.test(trimmed)) weight += 30 + trimmed.length * 0.15; // table row: ~0.5x line height + tiny char factor
+    else if (/^[-*]\s+/.test(trimmed)) weight += trimmed.length * 1.2 + 8; // list item
+    else weight += trimmed.length + 2;
+  }
+  return weight;
+}
+
 function splitParagraphs(text) {
   return text
     .replace(/\r\n/g, '\n')
@@ -475,8 +501,11 @@ function splitIntoCards(text, opts = {}) {
 
   let bodyParas = [...paragraphs];
   if (hasCover && !opts.title) {
+    // Smart title exclusion: if first paragraph is a heading, or if first paragraph
+    // starts with the extracted title, exclude it from body content.
+    const firstIsHeading = /^#{1,6}\s+/.test(paragraphs[0]);
     const firstClean = paragraphs[0].replace(/^#{1,6}\s+/, '').trim();
-    if (firstClean === title) {
+    if (firstIsHeading || firstClean.startsWith(title) || title.startsWith(firstClean)) {
       bodyParas = paragraphs.slice(1);
     }
   }
@@ -486,47 +515,49 @@ function splitIntoCards(text, opts = {}) {
 
   const cardContents = [];
   let currentChunks = [];
-  let currentLen = 0;
+  let currentWeight = 0;
 
   function flushCard() {
     if (currentChunks.length > 0) {
       cardContents.push(currentChunks.join('\n\n'));
       currentChunks = [];
-      currentLen = 0;
+      currentWeight = 0;
     }
   }
 
   for (const para of bodyParas) {
-    const isHeading = /^#{1,4}\s+/.test(para);
-    const paraLen = para.length;
+    const paraWeight = estimateVisualWeight(para);
 
-    if (currentLen + paraLen > charsPerCard && currentChunks.length > 0) {
+    if (currentWeight + paraWeight > charsPerCard && currentChunks.length > 0) {
       flushCard();
     }
 
-    if (paraLen > charsPerCard) {
+    if (paraWeight > charsPerCard) {
+      // Long paragraph — split into sentences, then clauses
       const sentences = splitSentences(para);
       for (const sent of sentences) {
-        if (sent.length > charsPerCard) {
+        const sentWeight = estimateVisualWeight(sent);
+        if (sentWeight > charsPerCard) {
           const clauses = splitClauses(sent);
           for (const clause of clauses) {
-            if (currentLen + clause.length > charsPerCard && currentChunks.length > 0) {
+            const clauseWeight = estimateVisualWeight(clause);
+            if (currentWeight + clauseWeight > charsPerCard && currentChunks.length > 0) {
               flushCard();
             }
             currentChunks.push(clause);
-            currentLen += clause.length + 2;
+            currentWeight += clauseWeight + 4;
           }
         } else {
-          if (currentLen + sent.length > charsPerCard && currentChunks.length > 0) {
+          if (currentWeight + sentWeight > charsPerCard && currentChunks.length > 0) {
             flushCard();
           }
           currentChunks.push(sent);
-          currentLen += sent.length + 2;
+          currentWeight += sentWeight + 4;
         }
       }
     } else {
       currentChunks.push(para);
-      currentLen += paraLen + 2;
+      currentWeight += paraWeight + 4;
     }
   }
   flushCard();
@@ -582,32 +613,83 @@ function parseMarkdown(text) {
   const htmlParts = [];
   let inList = false;
   let inQuote = false;
+  let inTable = false;
+  let tableHeader = null;
+
+  function closeList() { if (inList) { htmlParts.push('</ul>'); inList = false; } }
+  function closeQuote() { if (inQuote) { htmlParts.push('</blockquote>'); inQuote = false; } }
+  function closeTable() {
+    if (inTable) { htmlParts.push('</tbody></table>'); inTable = false; tableHeader = null; }
+  }
 
   for (const line of lines) {
     const trimmed = line.trim();
 
-    if (inList && !trimmed.startsWith('- ') && !trimmed.startsWith('* ')) {
-      htmlParts.push('</ul>');
-      inList = false;
-    }
-    if (inQuote && !trimmed.startsWith('> ')) {
-      htmlParts.push('</blockquote>');
-      inQuote = false;
+    // Close non-table blocks when switching
+    if (!trimmed.startsWith('- ') && !trimmed.startsWith('* ')) closeList();
+    if (!trimmed.startsWith('> ')) closeQuote();
+
+    // Table detection: line starts and ends with |
+    if (/^\|.*\|$/.test(trimmed)) {
+      closeList();
+      closeQuote();
+      const cells = trimmed.slice(1, -1).split('|').map(c => c.trim());
+      // Check if next line is separator (|---|---|)
+      if (cells.every(c => /^[-:]+$/.test(c))) {
+        // This is a separator line, skip it — header was previous line
+        continue;
+      }
+      // Check if this looks like a separator
+      if (cells.every(c => c === '' || /^[-:]+$/.test(c))) {
+        continue;
+      }
+      if (!inTable) {
+        // First row is header
+        tableHeader = cells;
+        htmlParts.push('<table>');
+        htmlParts.push('<thead><tr>');
+        for (const cell of cells) {
+          htmlParts.push(`<th>${formatInline(cell)}</th>`);
+        }
+        htmlParts.push('</tr></thead><tbody>');
+        inTable = true;
+      } else {
+        htmlParts.push('<tr>');
+        for (const cell of cells) {
+          htmlParts.push(`<td>${formatInline(cell)}</td>`);
+        }
+        htmlParts.push('</tr>');
+      }
+      continue;
+    } else {
+      closeTable();
     }
 
+    const h1Match = trimmed.match(/^#\s+(.+)/);
     const h3Match = trimmed.match(/^###\s+(.+)/);
     const h2Match = trimmed.match(/^##\s+(.+)/);
+    if (h1Match) {
+      closeList();
+      closeQuote();
+      htmlParts.push(`<h1 class="md-heading" style="font-size:${Math.round(density.headingSize * 1.15)}px; margin-bottom:28px; margin-top:8px;">${escapeHtml(h1Match[1])}</h1>`);
+      continue;
+    }
     if (h2Match) {
+      closeList();
+      closeQuote();
       htmlParts.push(`<h2 class="md-heading">${escapeHtml(h2Match[1])}</h2>`);
       continue;
     }
     if (h3Match) {
+      closeList();
+      closeQuote();
       htmlParts.push(`<h3 class="md-heading">${escapeHtml(h3Match[1])}</h3>`);
       continue;
     }
 
     const quoteMatch = trimmed.match(/^>\s*(.*)/);
     if (quoteMatch) {
+      closeList();
       if (!inQuote) {
         htmlParts.push('<blockquote>');
         inQuote = true;
@@ -618,6 +700,7 @@ function parseMarkdown(text) {
 
     const listMatch = trimmed.match(/^[-*]\s+(.+)/);
     if (listMatch) {
+      closeQuote();
       if (!inList) {
         htmlParts.push('<ul>');
         inList = true;
@@ -630,11 +713,14 @@ function parseMarkdown(text) {
       continue;
     }
 
+    closeList();
+    closeQuote();
     htmlParts.push(`<p>${formatInline(trimmed)}</p>`);
   }
 
-  if (inList) htmlParts.push('</ul>');
-  if (inQuote) htmlParts.push('</blockquote>');
+  closeList();
+  closeQuote();
+  closeTable();
 
   return htmlParts.join('\n');
 }
@@ -670,7 +756,7 @@ function generateCardHTML(card, style, opts = {}) {
 
   let bodyContent = '';
   if (card.type === 'cover') {
-    bodyContent = generateCoverBody(card, style, density, accentColor);
+    bodyContent = generateCoverBody(card, style, density, accentColor, opts);
   } else if (card.type === 'content') {
     bodyContent = generateContentBody(card, style, density, accentColor);
   } else if (card.type === 'end') {
@@ -880,6 +966,37 @@ body {
   font-weight: 600;
 }
 
+.card table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: ${density.paraSpacing}px;
+  font-size: ${Math.round(density.fontSize * 0.85)}px;
+}
+
+.card table th {
+  background: ${style.accentBg};
+  color: ${style.heading};
+  font-weight: 700;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid ${accentColor}33;
+}
+
+.card table td {
+  padding: 8px 12px;
+  border: 1px solid ${accentColor}22;
+  color: ${style.text};
+  vertical-align: top;
+}
+
+.card table tr:nth-child(even) td {
+  background: ${style.accentBg}55;
+}
+
+.card table tr:last-child td {
+  border-bottom: 1px solid ${accentColor}33;
+}
+
 .cover {
   flex: 1;
   display: flex;
@@ -952,6 +1069,155 @@ body {
   background: ${accentColor};
 }
 
+/* ===== Cover Image (shared) ===== */
+.cover-image-wrap {
+  width: 100%;
+  margin-bottom: 36px;
+  overflow: hidden;
+  position: relative;
+}
+.cover-img {
+  display: block;
+  width: 100%;
+  height: 360px;
+  object-fit: cover;
+}
+
+/* When cover has image, align to top instead of center */
+.cover-has-image {
+  justify-content: flex-start !important;
+  padding-top: 50px !important;
+}
+
+/* --- ink: brush fade bottom --- */
+.img-ink {
+  border-radius: 2px;
+  -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+}
+.img-ink .cover-img { border-radius: 2px; }
+
+/* --- minimal: clean border --- */
+.img-minimal {
+  border: 1px solid ${accentColor}33;
+  border-radius: 0;
+}
+.img-minimal .cover-img { border-radius: 0; }
+
+/* --- magazine: corner accent --- */
+.img-magazine { border-radius: 0; position: relative; }
+.img-magazine::after {
+  content: ''; position: absolute; bottom: -6px; right: -6px;
+  width: 40px; height: 40px;
+  background: ${accentColor};
+  z-index: -1;
+}
+.img-magazine .cover-img { border-radius: 0; }
+
+/* --- aurora: gradient blend --- */
+.img-aurora { border-radius: 16px; overflow: hidden; }
+.img-aurora::after {
+  content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 50%;
+  background: linear-gradient(180deg, transparent, ${style.bg});
+  pointer-events: none;
+}
+
+/* --- dark: dark overlay --- */
+.img-dark { border-radius: 8px; overflow: hidden; }
+.img-dark::after {
+  content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 60%;
+  background: linear-gradient(180deg, transparent, ${style.bg});
+  pointer-events: none;
+}
+.img-dark .cover-img { border-radius: 8px; filter: brightness(0.85); }
+
+/* --- journal: polaroid style --- */
+.img-journal {
+  background: #fff; padding: 12px 12px 40px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+  transform: rotate(-1.5deg);
+  border-radius: 2px;
+  margin-bottom: 44px;
+}
+.img-journal .cover-img { border-radius: 0; height: 300px; }
+
+/* ===== Cover: chinese-ink ===== */
+.cover-ink { position: relative; }
+.ink-seal {
+  position: absolute; top: 10px; right: 10px;
+  width: 68px; height: 68px;
+  background: #C04848; color: #F5F0E8;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 34px; font-family: ${style.serifFont}; font-weight: 700;
+  border-radius: 6px; transform: rotate(-4deg);
+  box-shadow: 0 3px 12px rgba(192,72,72,0.35);
+  z-index: 2;
+}
+.ink-frame {
+  position: absolute; top: 40px; left: 40px; right: 40px; bottom: 40px;
+  border: 1px solid ${accentColor}33; border-radius: 2px;
+  pointer-events: none;
+}
+.ink-title-block { display: flex; align-items: stretch; gap: 22px; margin-bottom: 24px; }
+.ink-title-bar {
+  width: 6px; border-radius: 3px; flex-shrink: 0;
+  background: linear-gradient(180deg, ${accentColor} 0%, ${accentColor}33 100%);
+}
+.ink-title { font-size: 66px !important; line-height: 1.3 !important; }
+.ink-brush-line {
+  width: 140px; height: 4px; border-radius: 2px; margin-bottom: 28px;
+  background: linear-gradient(90deg, ${accentColor} 0%, ${accentColor}00 100%);
+}
+
+/* ===== Cover: minimal-white ===== */
+.minimal-issue {
+  font-size: 24px; color: ${style.pageNum}; font-weight: 700;
+  letter-spacing: 0.2em; margin-bottom: 44px; text-transform: uppercase;
+}
+.minimal-title-block { display: flex; align-items: stretch; gap: 26px; margin-bottom: 20px; }
+.minimal-bar { width: 8px; background: ${accentColor}; flex-shrink: 0; }
+.minimal-title { font-size: 72px !important; }
+.minimal-line { width: 80px; height: 2px; background: ${accentColor}; margin-bottom: 28px; }
+
+/* ===== Cover: cream-magazine ===== */
+.magazine-header {
+  display: flex; justify-content: space-between; align-items: center;
+  width: 100%; margin-bottom: 50px; padding-bottom: 16px;
+  border-bottom: 2px solid ${accentColor};
+}
+.magazine-vol { font-size: 28px; font-weight: 800; color: ${accentColor}; letter-spacing: 0.12em; }
+.magazine-date { font-size: 26px; color: ${style.subheading}; letter-spacing: 0.05em; }
+.magazine-title { font-size: 76px !important; font-family: ${style.serifFont} !important; }
+.magazine-ornament { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+.magazine-line { width: 60px; height: 2px; background: ${accentColor}; }
+.magazine-diamond { width: 10px; height: 10px; background: ${accentColor}; transform: rotate(45deg); }
+
+/* ===== Cover: aurora-gradient ===== */
+.aurora-rings { position: absolute; top: 30px; right: 30px; width: 140px; height: 140px; }
+.aurora-ring { position: absolute; border-radius: 50%; }
+.aurora-ring-1 { width: 140px; height: 140px; border: 1px solid rgba(255,255,255,0.25); }
+.aurora-ring-2 { width: 100px; height: 100px; top: 20px; right: 20px; border: 1px solid rgba(255,255,255,0.4); }
+.aurora-ring-3 { width: 60px; height: 60px; top: 40px; right: 40px; border: 1px solid rgba(255,255,255,0.6); }
+.aurora-title { font-size: 76px !important; text-shadow: 0 2px 24px rgba(0,0,0,0.15); }
+.aurora-underline { width: 100px; height: 3px; background: rgba(255,255,255,0.6); border-radius: 2px; margin-bottom: 28px; }
+
+/* ===== Cover: dark-night ===== */
+.dark-stars { position: absolute; top: 0; left: 0; right: 0; height: 250px; pointer-events: none; }
+.dark-star { position: absolute; background: ${accentColor}; border-radius: 50%; }
+.dark-title { font-size: 76px !important; text-shadow: 0 0 40px ${accentColor}55; }
+.dark-underline { width: 120px; height: 3px; border-radius: 2px; margin-bottom: 28px;
+  background: linear-gradient(90deg, ${accentColor}, ${accentColor}00);
+}
+
+/* ===== Cover: journal-note ===== */
+.journal-tapes { position: absolute; top: 20px; right: 50px; }
+.journal-tape { width: 100px; height: 28px; border-radius: 2px; margin-bottom: 8px; }
+.journal-tape-1 { background: ${accentColor}88; opacity: 0.6; transform: rotate(3deg); }
+.journal-tape-2 { background: ${accentColor}55; opacity: 0.5; transform: rotate(-2deg); width: 70px; margin-left: 30px; }
+.journal-arrow { font-size: 52px; color: ${accentColor}; opacity: 0.5; margin-bottom: 8px; line-height: 1; }
+.journal-title { font-size: 68px !important; font-family: ${style.headingFont} !important; }
+.journal-dashed-line { width: 100%; border-top: 2px dashed ${accentColor}55; margin-bottom: 28px; }
+
 .content {
   flex: 1;
   display: flex;
@@ -965,15 +1231,15 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  padding-top: 20px;
+  padding-top: 10px;
 }
 
 .content-footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 30px;
-  padding-top: 20px;
+  margin-top: 20px;
+  padding-top: 16px;
   border-top: 1px solid ${accentColor}22;
 }
 
@@ -1036,11 +1302,32 @@ body {
 `;
 }
 
-function generateCoverBody(card, style, density, accentColor) {
-  const decorClass = `decor-${style.decor}`;
-  const hasGlass = style.decor === 'glass';
+function generateCoverBody(card, style, density, accentColor, opts = {}) {
+  const decor = style.decor;
+  const hasGlass = decor === 'glass';
   const wrapperOpen = hasGlass ? `<div class="card-inner">` : '';
   const wrapperClose = hasGlass ? `</div>` : '';
+
+  // Embed cover image as base64 data URI
+  let coverImgTag = '';
+  if (opts.coverImage) {
+    try {
+      const imgPath = path.resolve(opts.coverImage);
+      if (fs.existsSync(imgPath)) {
+        const ext = path.extname(imgPath).toLowerCase();
+        const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
+        const mime = mimeMap[ext] || 'image/png';
+        const imgData = fs.readFileSync(imgPath).toString('base64');
+        coverImgTag = `<img class="cover-img" src="data:${mime};base64,${imgData}" alt="cover illustration" />`;
+      }
+    } catch (e) { /* ignore image errors */ }
+  }
+
+  // Build the image block HTML for each style
+  function imgBlock(className = '') {
+    if (!coverImgTag) return '';
+    return `<div class="cover-image-wrap ${className}">${coverImgTag}</div>`;
+  }
 
   let tagHtml = card.tag ? `<div class="cover-tag">${escapeHtml(card.tag)}</div>` : '';
   let subtitleHtml = card.subtitle ? `<div class="cover-subtitle">${escapeHtml(card.subtitle)}</div>` : '';
@@ -1050,17 +1337,140 @@ function generateCoverBody(card, style, density, accentColor) {
   metaParts.push(`<span class="cover-reading">约 ${card.readingTime} 分钟阅读</span>`);
   const metaHtml = `<div class="cover-meta">${metaParts.join('')}</div>`;
 
-  return `
-<div class="${decorClass} card-wrapper" style="flex:1; display:flex; flex-direction:column;">
+  const title = escapeHtml(card.title);
+  const wrap = (inner) => `
+<div class="decor-${decor} card-wrapper" style="flex:1; display:flex; flex-direction:column;">
 ${wrapperOpen}
-<div class="cover">
-  ${tagHtml}
-  <h1 class="cover-title">${escapeHtml(card.title)}</h1>
-  ${subtitleHtml}
-  ${metaHtml}
-</div>
+${inner}
 ${wrapperClose}
 </div>`;
+  const coverImgCls = coverImgTag ? ' cover-has-image' : '';
+
+  // --- chinese-ink ---
+  if (decor === 'ink') {
+    const sealChar = card.author ? escapeHtml(card.author.charAt(0)) : '\u6587';
+    return wrap(`
+<div class="cover cover-ink${coverImgCls}">
+  <div class="ink-seal">${sealChar}</div>
+  <div class="ink-frame"></div>
+  ${imgBlock('img-ink')}
+  ${tagHtml}
+  <div class="ink-title-block">
+    <div class="ink-title-bar"></div>
+    <h1 class="cover-title ink-title">${title}</h1>
+  </div>
+  <div class="ink-brush-line"></div>
+  ${subtitleHtml}
+  ${metaHtml}
+</div>`);
+  }
+
+  // --- minimal-white (top-line) ---
+  if (decor === 'top-line') {
+    return wrap(`
+<div class="cover cover-minimal${coverImgCls}">
+  <div class="minimal-issue">No.${String(card.pageNum || 1).padStart(3, '0')}</div>
+  ${imgBlock('img-minimal')}
+  ${tagHtml}
+  <div class="minimal-title-block">
+    <div class="minimal-bar"></div>
+    <h1 class="cover-title minimal-title">${title}</h1>
+  </div>
+  <div class="minimal-line"></div>
+  ${subtitleHtml}
+  ${metaHtml}
+</div>`);
+  }
+
+  // --- cream-magazine ---
+  if (decor === 'magazine') {
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}`;
+    return wrap(`
+<div class="cover cover-magazine${coverImgCls}">
+  <div class="magazine-header">
+    <span class="magazine-vol">VOL.001</span>
+    <span class="magazine-date">${dateStr}</span>
+  </div>
+  ${imgBlock('img-magazine')}
+  ${tagHtml}
+  <h1 class="cover-title magazine-title">${title}</h1>
+  <div class="magazine-ornament">
+    <span class="magazine-line"></span>
+    <span class="magazine-diamond"></span>
+    <span class="magazine-line"></span>
+  </div>
+  ${subtitleHtml}
+  ${metaHtml}
+</div>`);
+  }
+
+  // --- aurora-gradient (glass) ---
+  if (decor === 'glass') {
+    return wrap(`
+<div class="cover cover-aurora${coverImgCls}">
+  <div class="aurora-rings">
+    <div class="aurora-ring aurora-ring-1"></div>
+    <div class="aurora-ring aurora-ring-2"></div>
+    <div class="aurora-ring aurora-ring-3"></div>
+  </div>
+  ${imgBlock('img-aurora')}
+  ${tagHtml}
+  <h1 class="cover-title aurora-title">${title}</h1>
+  <div class="aurora-underline"></div>
+  ${subtitleHtml}
+  ${metaHtml}
+</div>`);
+  }
+
+  // --- dark-night (glow) ---
+  if (decor === 'glow') {
+    const stars = [];
+    for (let i = 0; i < 8; i++) {
+      const top = 5 + Math.random() * 35;
+      const left = 5 + Math.random() * 90;
+      const size = 2 + Math.random() * 4;
+      stars.push(`<span class="dark-star" style="top:${top}%;left:${left}%;width:${size}px;height:${size}px;opacity:${0.3 + Math.random() * 0.5};"></span>`);
+    }
+    return wrap(`
+<div class="cover cover-dark${coverImgCls}">
+  <div class="dark-stars">${stars.join('')}</div>
+  ${imgBlock('img-dark')}
+  ${tagHtml}
+  <h1 class="cover-title dark-title">${title}</h1>
+  <div class="dark-underline"></div>
+  ${subtitleHtml}
+  ${metaHtml}
+</div>`);
+  }
+
+  // --- journal-note (washi) ---
+  if (decor === 'washi') {
+    return wrap(`
+<div class="cover cover-journal${coverImgCls}">
+  <div class="journal-tapes">
+    <div class="journal-tape journal-tape-1"></div>
+    <div class="journal-tape journal-tape-2"></div>
+  </div>
+  ${imgBlock('img-journal')}
+  ${tagHtml}
+  <div class="journal-arrow">\u2198</div>
+  <h1 class="cover-title journal-title">${title}</h1>
+  <div class="journal-dashed-line"></div>
+  ${subtitleHtml}
+  ${metaHtml}
+</div>`);
+  }
+
+  // --- fallback: original simple cover ---
+  return wrap(`
+<div class="cover${coverImgCls}">
+  ${imgBlock()}
+  ${tagHtml}
+  <h1 class="cover-title">${title}</h1>
+  ${subtitleHtml}
+  ${metaHtml}
+</div>`);
 }
 
 function generateContentBody(card, style, density, accentColor) {
@@ -1256,6 +1666,7 @@ Options:
   --subtitle <text>     Cover subtitle
   --tag <text>          Topic tag on cover (e.g. #干货分享)
   --author <text>       Author name on cover/end
+  --cover-image <path>  Cover illustration image file path
   --no-cover            Skip cover page
   --no-end              Skip end page
   --preview             Generate HTML preview file only (no PNG)
@@ -1361,6 +1772,7 @@ async function main() {
     tag: args.tag || null,
     author: args.author || null,
     accentColor: args['accent-color'] || null,
+    coverImage: args['cover-image'] || null,
     width: args.width ? parseInt(args.width) : DEFAULT_WIDTH,
   };
 
