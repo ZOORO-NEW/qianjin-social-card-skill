@@ -1,4 +1,8 @@
 ---
+version: 1.0.0
+slug: qianjin-social-card-skill
+displayName: 长文转社交卡片
+license: MIT
 title: "社交卡片生成器"
 name: qianjin-social-card-skill
 category: 内容创作
