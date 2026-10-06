@@ -8,6 +8,7 @@ name: qianjin-social-card-skill
 category: 内容创作
 platforms: [workbuddy, claude-code, cursor, windsurf, codex, linux, macos, windows]
 summary: "将长文案排版为 3:4 比例精美图片，自动裁切多张，适合小红书和公众号贴图"
+description: "把长文案排版成 3:4 比例的精美图片并自动裁切为多张，用于小红书、公众号贴图发布。支持 6 种排版风格、智能分页、Markdown 语法与关键句高亮。触发词：社交卡片、小红书图、文案转图片、长文切图、公众号贴图。"
 author: "qianjin"
 tags: ["social-card", "xiaohongshu", "image", "typography", "排版"]
 read_when:
