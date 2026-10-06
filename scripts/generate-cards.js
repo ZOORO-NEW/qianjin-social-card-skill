@@ -608,7 +608,7 @@ function splitIntoCards(text, opts = {}) {
 // Markdown Parsing
 // ============================================================
 
-function parseMarkdown(text) {
+function parseMarkdown(text, density) {
   const lines = text.split('\n');
   const htmlParts = [];
   let inList = false;
@@ -1479,7 +1479,7 @@ function generateContentBody(card, style, density, accentColor) {
   const wrapperOpen = hasGlass ? `<div class="card-inner">` : '';
   const wrapperClose = hasGlass ? `</div>` : '';
 
-  let contentHtml = parseMarkdown(card.content);
+  let contentHtml = parseMarkdown(card.content, density);
 
   if (card.keySentences && card.keySentences.length > 0) {
     for (const ks of card.keySentences) {
