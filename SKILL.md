@@ -6,7 +6,7 @@ license: MIT
 title: "社交卡片生成器"
 name: qianjin-social-card-skill
 category: 内容创作
-platforms: [workbuddy, claude-code, cursor, windsurf, codex]
+platforms: [workbuddy, claude-code, cursor, windsurf, codex, linux, macos, windows]
 summary: "将长文案排版为 3:4 比例精美图片，自动裁切多张，适合小红书和公众号贴图"
 author: "qianjin"
 tags: ["social-card", "xiaohongshu", "image", "typography", "排版"]
